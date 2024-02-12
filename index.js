@@ -243,7 +243,16 @@ async function writeFile (path, buffer, permission) {
     const isSymlink = (permission & 0o170000) == 0o120000
     if (DEBUG) console.log('writeFile()', path, (permission & 0o170000).toString(2).substring(0, 4), (permission | 0o170000).toString(2).substring(4), isDirectory, isNormalFile, isExecutable, isSymlink)
     if (isSymlink) {
-        await fs.promises.symlink(buffer.toString(), path)
+        try {
+            await fs.promises.symlink(buffer.toString(), path)
+        } catch (error) {
+            if (error.code == 'EEXIST') {
+                // symlink exists - delete and try again
+                console.warn("WARNING: overriding symbolic link to " + error.path);
+                await fs.promises.rm(path)
+                await fs.promises.symlink(buffer.toString(), path)
+            }
+        }
     } else {
         await writeFileAtomic(path, buffer, { mode: permission })
     }
@@ -398,7 +407,7 @@ async function main (config, args) {
     if (options.forceReCreateRepo) {
         if (isTargetRepoExists) {
             console.log('Remove existing repo:', options.targetRepoPath)
-            await fs.promises.rmdir(options.targetRepoPath, { recursive: true, force: true })
+            await fs.promises.rm(options.targetRepoPath, { recursive: true, force: true })
         }
     } else {
         if (isFollowByLogFileFeatureEnabled && isFollowByNumberOfCommits) exit('ERROR: Config error! The behavior will be non-deterministic. You want to follow by log file and follow by number of commits! Choose one or use `forceReCreateRepo`', 5)
