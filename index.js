@@ -458,6 +458,26 @@ async function main (config, args) {
     const targetHeadCommit = await targetRepo.getHeadCommit()
     const targetCommits = await getCommitHistory(targetHeadCommit) // getHeadCommit ?
 
+    // generate map between commit sha and tag name
+    const tags = await Git.Tag.list(sourceRepo)
+    const tagMap = new Map()
+    for (const tag of tags) {
+        const commit = await Git.Reference.lookup(sourceRepo, `refs/tags/${tag}`)
+            .then(ref => ref.peel(Git.Object.TYPE.COMMIT))
+            .then(ref => Git.Commit.lookup(sourceRepo, ref.id())) // ref.id() now
+            .then(commit => ({
+                sha: commit.sha(),
+                author: commit.author(),
+                committer: commit.committer(),
+                date: commit.date(),
+                offset: commit.timeOffset(),
+                message: commit.message(),
+            }))
+        tagMap.set(commit.sha, tag)
+        if (DEBUG)
+            console.log('tag found:', tag, commit.sha)
+    }
+
     if (isFollowByLogFileFeatureEnabled) {
         if (existingLogState.commits.length === 0) {
             isFollowByLogFileFeatureEnabled = false
@@ -593,6 +613,22 @@ async function main (config, args) {
         await reWriteFilesInRepo(options.targetRepoPath, files)
         const newSha = await commitFiles(targetRepo, commit.author, commit.committer, commit.message, files)
         lastTargetCommit = newSha
+
+        if (tagMap.has(commit.sha)) {
+            const tag = tagMap.get(commit.sha)
+            const tagSHA = (await Git.Reference.nameToId(sourceRepo, `refs/tags/${tag}`)).toString();
+            if (tagSHA === commit.sha) {
+                // lightweight tag
+                // if (DEBUG) 
+                    console.log('Creating lightweight tag:', tag, newSha)
+                await targetRepo.createLightweightTag(newSha, tag)
+            } else {
+                // annotated tag
+                // if (DEBUG) 
+                    console.log('Creating annotated tag:', tag, newSha)
+                await targetRepo.createTag(newSha, tag, commit.message)
+            }
+        }
 
         time1 = time2
         time2 = Date.now()
