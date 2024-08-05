@@ -473,7 +473,16 @@ async function main (config, args) {
                 offset: commit.timeOffset(),
                 message: commit.message(),
             }))
-        tagMap.set(commit.sha, tag)
+        // commit may have multiple tags
+        if (tagMap.has(commit.sha)) {
+            if (DEBUG)
+                console.log('tag already exists:', tag, commit.sha)
+            const existingtag = tagMap.get(commit.sha)
+            existingtag.push(tag)
+            tagMap.set(commit.sha, existingtag)
+        }
+        else
+            tagMap.set(commit.sha, [ tag ])
         if (DEBUG)
             console.log('tag found:', tag, commit.sha)
     }
@@ -615,18 +624,20 @@ async function main (config, args) {
         lastTargetCommit = newSha
 
         if (tagMap.has(commit.sha)) {
-            const tag = tagMap.get(commit.sha)
-            const tagSHA = (await Git.Reference.nameToId(sourceRepo, `refs/tags/${tag}`)).toString();
-            if (tagSHA === commit.sha) {
-                // lightweight tag
-                // if (DEBUG) 
-                    console.log('Creating lightweight tag:', tag, newSha)
-                await targetRepo.createLightweightTag(newSha, tag)
-            } else {
-                // annotated tag
-                // if (DEBUG) 
-                    console.log('Creating annotated tag:', tag, newSha)
-                await targetRepo.createTag(newSha, tag, commit.message)
+            const tags = tagMap.get(commit.sha)
+            for (const tag of tags) {
+                const tagSHA = (await Git.Reference.nameToId(sourceRepo, `refs/tags/${tag}`)).toString();
+                if (tagSHA === commit.sha) {
+                    // lightweight tag
+                    // if (DEBUG) 
+                        console.log('Creating lightweight tag:', tag, newSha)
+                    await targetRepo.createLightweightTag(newSha, tag)
+                } else {
+                    // annotated tag
+                    // if (DEBUG) 
+                        console.log('Creating annotated tag:', tag, newSha)
+                    await targetRepo.createTag(newSha, tag, commit.message)
+                }
             }
         }
 
