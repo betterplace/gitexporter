@@ -243,7 +243,16 @@ async function writeFile (path, buffer, permission) {
     const isSymlink = (permission & 0o170000) == 0o120000
     if (DEBUG) console.log('writeFile()', path, (permission & 0o170000).toString(2).substring(0, 4), (permission | 0o170000).toString(2).substring(4), isDirectory, isNormalFile, isExecutable, isSymlink)
     if (isSymlink) {
-        await fs.promises.symlink(buffer.toString(), path)
+        try {
+            await fs.promises.symlink(buffer.toString(), path)
+        } catch (error) {
+            if (error.code == 'EEXIST') {
+                // symlink exists - delete and try again
+                console.warn("WARNING: overriding symbolic link to " + error.path);
+                await fs.promises.rm(path)
+                await fs.promises.symlink(buffer.toString(), path)
+            }
+        }
     } else {
         await writeFileAtomic(path, buffer, { mode: permission })
     }
@@ -398,7 +407,7 @@ async function main (config, args) {
     if (options.forceReCreateRepo) {
         if (isTargetRepoExists) {
             console.log('Remove existing repo:', options.targetRepoPath)
-            await fs.promises.rmdir(options.targetRepoPath, { recursive: true, force: true })
+            await fs.promises.rm(options.targetRepoPath, { recursive: true, force: true })
         }
     } else {
         if (isFollowByLogFileFeatureEnabled && isFollowByNumberOfCommits) exit('ERROR: Config error! The behavior will be non-deterministic. You want to follow by log file and follow by number of commits! Choose one or use `forceReCreateRepo`', 5)
@@ -448,6 +457,35 @@ async function main (config, args) {
     const commits = await getCommitHistory(sourceHeadCommit) // getHeadCommit ?
     const targetHeadCommit = await targetRepo.getHeadCommit()
     const targetCommits = await getCommitHistory(targetHeadCommit) // getHeadCommit ?
+
+    // generate map between commit sha and tag name
+    const tags = await Git.Tag.list(sourceRepo)
+    const tagMap = new Map()
+    for (const tag of tags) {
+        const commit = await Git.Reference.lookup(sourceRepo, `refs/tags/${tag}`)
+            .then(ref => ref.peel(Git.Object.TYPE.COMMIT))
+            .then(ref => Git.Commit.lookup(sourceRepo, ref.id())) // ref.id() now
+            .then(commit => ({
+                sha: commit.sha(),
+                author: commit.author(),
+                committer: commit.committer(),
+                date: commit.date(),
+                offset: commit.timeOffset(),
+                message: commit.message(),
+            }))
+        // commit may have multiple tags
+        if (tagMap.has(commit.sha)) {
+            if (DEBUG)
+                console.log('tag already exists:', tag, commit.sha)
+            const existingtag = tagMap.get(commit.sha)
+            existingtag.push(tag)
+            tagMap.set(commit.sha, existingtag)
+        }
+        else
+            tagMap.set(commit.sha, [ tag ])
+        if (DEBUG)
+            console.log('tag found:', tag, commit.sha)
+    }
 
     if (isFollowByLogFileFeatureEnabled) {
         if (existingLogState.commits.length === 0) {
@@ -584,6 +622,24 @@ async function main (config, args) {
         await reWriteFilesInRepo(options.targetRepoPath, files)
         const newSha = await commitFiles(targetRepo, commit.author, commit.committer, commit.message, files)
         lastTargetCommit = newSha
+
+        if (tagMap.has(commit.sha)) {
+            const tags = tagMap.get(commit.sha)
+            for (const tag of tags) {
+                const tagSHA = (await Git.Reference.nameToId(sourceRepo, `refs/tags/${tag}`)).toString();
+                if (tagSHA === commit.sha) {
+                    // lightweight tag
+                    // if (DEBUG) 
+                        console.log('Creating lightweight tag:', tag, newSha)
+                    await targetRepo.createLightweightTag(newSha, tag)
+                } else {
+                    // annotated tag
+                    // if (DEBUG) 
+                        console.log('Creating annotated tag:', tag, newSha)
+                    await targetRepo.createTag(newSha, tag, commit.message)
+                }
+            }
+        }
 
         time1 = time2
         time2 = Date.now()
